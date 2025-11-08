@@ -58,8 +58,28 @@ substitue_type_partout :: Equation -> String -> PType -> Equation
 substitue_type_partout eq s pt = L.map (\(pt1, pt2) -> (substitue_type pt1 s pt, substitue_type pt2 s pt)) eq
 
 genere_equation :: PTerm -> PType -> Environnement -> Equation
-genere_equation (Variable v) pty env    = [(pty, cherche_type v env)]
---genere_equation (App pt1 pt2) pty env   = 
+genere_equation pte pty env = ST.evalState (aux pte pty env) 0
+  where
+    aux :: PTerm -> PType -> Environnement -> State Int Equation
+    aux (Variable v) pty env = return [(pty, cherche_type v env)]
+
+    aux (App pt1 pt2) pty env = do
+      nv  <- nouvelle_variable
+      eq1 <- aux pt1 (Arrow (Type nv) pty) env
+      eq2 <- aux pt2 (Type nv) env
+      return $ eq1 ++ eq2
+
+    aux (Abs x pt) pty env = do
+        nv1  <- nouvelle_variable
+        nv2  <- nouvelle_variable
+        eq   <- aux pt (Type nv2) (M.insert x (Type nv1) env)
+        return $ (pty, Arrow (Type nv1) (Type nv2)) : eq
+
+    aux (N _) pty env = return [(pty, Nat)]
+
+    aux (Add pt1 pt2) pty env = do
+        eq1 <- aux pt1 Nat env
+        eq2 <- 
 
 
 -- Unification
