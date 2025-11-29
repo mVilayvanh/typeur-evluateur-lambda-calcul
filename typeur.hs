@@ -1,96 +1,147 @@
 {-# LANGUAGE DeriveAnyClass #-}
-{- HLINT ignore "Use camelCase" -}
 
 import Control.Monad.State(State)
 import Control.Exception(Exception)
 import qualified Control.Exception as E
-import qualified Control.Monad.State as ST 
+import qualified Control.Monad.State as ST
 import Data.Map(Map)
+import Data.Set(Set)
+import qualified Data.Set as S
 import qualified Data.Maybe as MB
 import qualified Data.Map as M
 import qualified Data.List as L
 import Data.Either(Either)
 
--- Termes
-data PTerm = Variable String | App PTerm PTerm | Abs String PTerm 
-    | N Integer | Add PTerm PTerm
+data PTerm = Variable String | App PTerm PTerm | Abs String PTerm
+    | N Integer | Add PTerm PTerm | Sub PTerm PTerm
+    | Cons PTerm PTerm | Nil | Head PTerm | Tail PTerm
+    | IfZero PTerm PTerm PTerm | IfEmpty PTerm PTerm PTerm
+    | Rec PTerm | Let String PTerm PTerm
 
 instance Show PTerm where
-    show (Variable s)   = s
-    show (N i)          = show i
-    show (App pt1 pt2)  = "(" ++ show pt1 ++ ", " ++ show pt2 ++ ")"
-    show (Abs s pt)     = "(fun " ++ s ++ " -> " ++ show pt ++ ")"
-    show (Add pt1 pt2)  = "(" ++ show pt1 ++ " + " ++ show pt2 ++ ")"
+    show (Variable s)       = s
+    show (N i)              = show i
+    show (App pt1 pt2)      = "(" ++ show pt1 ++ ", " ++ show pt2 ++ ")"
+    show (Abs s pt)         = "(fun " ++ s ++ " -> " ++ show pt ++ ")"
+    show (Add pt1 pt2)      = "(" ++ show pt1 ++ " + " ++ show pt2 ++ ")"
+    show (Sub pt1 pt2)      = "(" ++ show pt1 ++ " - " ++ show pt2 ++ ")"
+    show (Cons pt1 pt2)     = "(" ++ show pt1 ++ " :: " ++ show pt2 ++ ")"
+    show Nil                = "[]"
+    show (IfZero c pt1 pt2) =  "(if0 " ++ show c ++ " then " ++ show pt1 ++ " else " ++ show pt2 ++ ")"
+    show (IfEmpty c pt1 pt2)= "(ifEmpty " ++ show c ++ " then " ++ show pt1 ++ " else " ++ show pt2 ++ ")"
+    show (Rec pt)           = "(rec " ++ show pt ++ ")"
+    show (Let x pt1 pt2)    = "(let " ++ x ++ " = " ++ show pt1 ++ " in " ++ show pt2 ++ ")"
 
--- Types
-data PType = Type String | Arrow PType PType | Product PType PType | Nat 
+data PType = TVar String | Arrow PType PType | Product PType PType | Nat
+    | ListT PType | Forall String PType
 
 instance Show PType where
-    show (Type s)           = s
+    show (TVar s)           = s
     show (Product pt1 pt2)  = "(" ++ show pt1 ++ " x " ++ show pt2 ++ ")"
     show (Arrow pt1 pt2)    = "(" ++ show pt1 ++ " -> " ++ show pt2 ++ ")"
     show Nat                = "Nat"
+    show (ListT pt)         = "[" ++ show pt ++ "]"
+    show (Forall x pt)      = "(forall " ++ show x ++ ". " ++ show pt ++ ")"
 
--- Environnement
 type Environnement = Map String PType
 
--- Listes d'équation
 type Equation = [(PType, PType)]
 
-type Equation_Z = (Equation, Equation)
+type EquationZ = (Equation, Equation)
 
 type Compteur = State Int
 
+type VarGen = State Int
+
 data VarPasTrouve = VarPasTrouve deriving (Show, Exception)
 
-newtype Echec_unif = Echec_unif String
+newtype EchecUnif = Echec_unif String
     deriving (Show, Exception)
 
-nouvelle_variable :: Compteur String
-nouvelle_variable = do
+maxStepUnification :: Int
+maxStepUnification = 1000
+
+maxStepEvaluation :: Int
+maxStepEvaluation = 100
+
+-- Typeur
+
+nouvelleVariableTypage :: Compteur String
+nouvelleVariableTypage = do
     n <- ST.get
     ST.put (n + 1)
     return ("T" ++ show n)
 
-cherche_type :: String -> Environnement -> Either VarPasTrouve PType
-cherche_type s e = case M.lookup s e of
+variablesLibre :: PTerm -> Set String
+variablesLibre term = case term of
+    Variable v -> S.singleton v
+    Abs v t    -> S.delete v (variablesLibre t)
+    App t1 t2  -> S.union (variablesLibre t1) (variablesLibre t2)
+    Add t1 t2  -> S.union (variablesLibre t1) (variablesLibre t2)
+    N _        -> S.empty
+
+estValeur :: PTerm -> Bool
+estValeur (Abs _ _) = True
+estValeur (N _)     = True
+estValeur _         = False
+
+typerVariableLibre :: PType -> Set String
+typerVariableLibre (TVar x)          = S.singleton x
+typerVariableLibre (Arrow t1 t2)     = typerVariableLibre t1 `S.union` typerVariableLibre t2
+typerVariableLibre (Product t1 t2)   = typerVariableLibre t1 `S.union` typerVariableLibre t2
+typerVariableLibre (ListT t)         = typerVariableLibre t
+typerVariableLibre Nat               = S.empty
+typerVariableLibre (Forall x t)      = S.delete x (typerVariableLibre t)
+
+freeVarsEnv :: Environnement -> Set String
+freeVarsEnv env = foldr (S.union . typerVariableLibre) S.empty (M.elems env)
+
+generalise :: Environnement -> PType -> PType
+generalise env t =
+    let fvEnv = freeVarsEnv env
+        fvT   = typerVariableLibre t
+        polys = fvT S.\\ fvEnv
+    in foldr Forall t polys
+
+chercheType :: String -> Environnement -> Either VarPasTrouve PType
+chercheType s e = case M.lookup s e of
     Just t  -> Right t
     Nothing -> Left VarPasTrouve
 
-appartient_type :: String -> PType -> Bool
-appartient_type s1 (Type s2)        = s1 == s2
-appartient_type s (Arrow pt1 pt2)   = appartient_type s pt1 || appartient_type s pt2
-appartient_type _ _ = False
+appartientType :: String -> PType -> Bool
+appartientType s1 (TVar s2)        = s1 == s2
+appartientType s (Arrow pt1 pt2)   = appartientType s pt1 || appartientType s pt2
+appartientType _ _ = False
 
-substitue_type :: PType -> String -> PType -> PType
-substitue_type pt@(Type s1) s2 newPt
+substitueType :: PType -> String -> PType -> PType
+substitueType pt@(TVar s1) s2 newPt
     | s1 == s2  = newPt
     | otherwise = pt
-substitue_type (Arrow pt1 pt2) s newPt  = Arrow (substitue_type pt1 s newPt) (substitue_type pt2 s newPt)
-substitue_type Nat _ _                  = Nat
+substitueType (Arrow pt1 pt2) s newPt  = Arrow (substitueType pt1 s newPt) (substitueType pt2 s newPt)
+substitueType Nat _ _                  = Nat
 
-substitue_type_partout :: Equation -> String -> PType -> Equation
-substitue_type_partout eq s pt = L.map (\(pt1, pt2) -> (substitue_type pt1 s pt, substitue_type pt2 s pt)) eq
+substitueTypePartout :: Equation -> String -> PType -> Equation
+substitueTypePartout eq s pt = L.map (\(pt1, pt2) -> (substitueType pt1 s pt, substitueType pt2 s pt)) eq
 
-genere_equation :: PTerm -> PType -> Environnement -> Equation
-genere_equation pte pty env = ST.evalState (aux pte pty env) 1
+genereEquation :: PTerm -> PType -> Environnement -> Equation
+genereEquation pte pty env = ST.evalState (aux pte pty env) 1
   where
     aux :: PTerm -> PType -> Environnement -> State Int Equation
-    aux (Variable v) pty env = case cherche_type v env of
+    aux (Variable v) pty env = case chercheType v env of
         Left _     -> error $ "variable " ++ v ++ " non trouvée dans l'environnement"
         Right tvar -> return [(pty, tvar)]
 
     aux (App pt1 pt2) pty env = do
-      nv  <- nouvelle_variable
-      eq1 <- aux pt1 (Arrow (Type nv) pty) env
-      eq2 <- aux pt2 (Type nv) env
+      nv  <- nouvelleVariableTypage
+      eq1 <- aux pt1 (Arrow (TVar nv) pty) env
+      eq2 <- aux pt2 (TVar nv) env
       return $ eq1 ++ eq2
 
     aux (Abs x pt) pty env = do
-        nv1  <- nouvelle_variable
-        nv2  <- nouvelle_variable
-        eq   <- aux pt (Type nv2) (M.insert x (Type nv1) env)
-        return $ (pty, Arrow (Type nv1) (Type nv2)) : eq
+        nv1  <- nouvelleVariableTypage
+        nv2  <- nouvelleVariableTypage
+        eq   <- aux pt (TVar nv2) (M.insert x (TVar nv1) env)
+        return $ (pty, Arrow (TVar nv1) (TVar nv2)) : eq
 
     aux (N _) pty env = return [(pty, Nat)]
 
@@ -99,72 +150,211 @@ genere_equation pte pty env = ST.evalState (aux pte pty env) 1
         eq2 <- aux pt2 Nat env
         return $ (pty, Nat) : (eq1 ++ eq2)
 
-rembobine :: Equation_Z -> Equation_Z
+    aux (Sub pt1 pt2) pty env = do
+        eq1 <- aux pt1 Nat env
+        eq2 <- aux pt2 Nat env
+        return $ (pty, Nat) : (eq1 ++ eq2)
+
+    aux (Cons pt1 pt2) pty env = do
+        x <- nouvelleVariableTypage
+        eqh <- aux pt1 (TVar x) env
+        eqt <- aux pt2 (ListT (TVar x)) env
+        return $ (pty, ListT (TVar x)) : (eqh ++ eqt)
+
+    aux (Head pt) pty env = do
+        x <- nouvelleVariableTypage
+        eql <- aux pt (ListT (TVar x)) env
+        return $ (pty, TVar x) : eql
+
+    aux (Tail pt) pty env = do
+        x <- nouvelleVariableTypage
+        eql <- aux pt (ListT (TVar x)) env
+        return $ (pty, ListT (TVar x)) : eql
+
+    aux (IfZero ptc pt1 pt2) pty env = do
+        eqc <- aux ptc Nat env
+        eq1 <- aux pt1 pty env
+        eq2 <- aux pt2 pty env
+        return $ eqc ++ eq1 ++ eq2
+
+    aux (IfEmpty ptc pt1 pt2) pty env = do
+        x <- nouvelleVariableTypage
+        eqc <- aux ptc (ListT (TVar x)) env
+        eq1 <- aux pt1 pty env
+        eq2 <- aux pt2 pty env
+        return $ eqc ++ eq1 ++ eq2
+
+    aux (Rec pt) pty env = do
+        aux pt (Arrow pty pty) env
+
+    aux (Let x e1 e2) pty env = do
+        let t0 = case inference env e1 of
+                    Left err -> error ("Echec du typage dans let : " ++ show err)
+                    Right t  -> t
+            sigma = generalise env t0
+        aux e2 pty (M.insert x sigma env)
+
+rembobine :: EquationZ -> EquationZ
 rembobine e@([], _) = e
-rembobine (c:e1, e2) = (e1, c:e2)  
+rembobine (c:e1, e2) = (e1, c:e2)
 
-substitue_type_zip :: Equation_Z -> String -> PType -> Equation_Z
-substitue_type_zip (e1, e2) v pty = 
-    (substitue_type_partout e1 v pty, substitue_type_partout e2 v pty)
+substitueTypeZip :: EquationZ -> String -> PType -> EquationZ
+substitueTypeZip (e1, e2) v pty =
+    (substitueTypePartout e1 v pty, substitueTypePartout e2 v pty)
 
-trouve_but :: Equation_Z -> String -> Either VarPasTrouve PType
-trouve_but (_, []) _ = Left VarPasTrouve
-trouve_but (e1, (Type v, t) : e2) but
+trouveBut :: EquationZ -> String -> Either VarPasTrouve PType
+trouveBut (_, []) _ = Left VarPasTrouve
+trouveBut (e1, (TVar v, t) : e2) but
     | v == but = Right t
-    | otherwise = trouve_but ( (Type v, t) : e1 , e2) but
-trouve_but (e1, (t, Type v) : e2) but 
+    | otherwise = trouveBut ( (TVar v, t) : e1 , e2) but
+trouveBut (e1, (t, TVar v) : e2) but
     | v == but = Right t
-    | otherwise = trouve_but ((t, Type v) : e1 , e2) but
-trouve_but (e1, c : e2) but = trouve_but (c : e1, e2) but
+    | otherwise = trouveBut ((t, TVar v) : e1 , e2) but
+trouveBut (e1, c : e2) but = trouveBut (c : e1, e2) but
 
-unification :: Equation_Z -> String -> Either Echec_unif PType
-unification e@(_, []) but =
-    case trouve_but (rembobine e) but of
-        Left _  -> Left (Echec_unif "but pas trouvé")
+unification :: Int -> EquationZ -> String -> Either EchecUnif PType
+unification 0 _ _ = Left $ Echec_unif "timeout"
+unification _ e@(_, []) but =
+    case trouveBut (rembobine e) but of
+        Left _  -> Left $ Echec_unif "but pas trouvé"
         Right t -> Right t
-unification (e1, (Type v1, t2):e2) but
+unification n (e1, (TVar v1, t2):e2) but
     | v1 == but =
-        unification ((Type v1, t2):e1, e2) but
-unification (e1, (Type v1, Type v2):e2) but =
-    unification (substitue_type_zip (rembobine (e1,e2)) v2 (Type v1)) but
-unification (e1, (Type v1, t2):e2) but
-    | appartient_type v1 t2 =
-        Left (Echec_unif ("occurence de " ++ v1 ++ " dans " ++ show t2))
+        unification (n - 1) ((TVar v1, t2):e1, e2) but
+unification n (e1, (TVar v1, TVar v2):e2) but =
+    unification (n - 1) (substitueTypeZip (rembobine (e1,e2)) v2 (TVar v1)) but
+unification n (e1, (TVar v1, t2):e2) but
+    | appartientType v1 t2 =
+        Left $ Echec_unif ("occurence de " ++ v1 ++ " dans " ++ show t2)
     | otherwise =
-        unification (substitue_type_zip (rembobine (e1,e2)) v1 t2) but
-unification (e1, (t1, Type v2):e2) but
-    | appartient_type v2 t1 =
-        Left (Echec_unif ("occurence de " ++ v2 ++ " dans " ++ show t1))
+        unification (n - 1) (substitueTypeZip (rembobine (e1,e2)) v1 t2) but
+unification n (e1, (t1, TVar v2):e2) but
+    | appartientType v2 t1 =
+        Left $ Echec_unif ("occurence de " ++ v2 ++ " dans " ++ show t1)
     | otherwise =
-        unification (substitue_type_zip (rembobine (e1,e2)) v2 t1) but
-unification (e1, (Arrow t1 t2, Arrow t3 t4):e2) but =
-    unification (e1, (t1,t3):(t2,t4):e2) but
-unification (_, (Arrow{}, t3):_) _ =
-    Left (Echec_unif ("type fleche non-unifiable avec " ++ show t3))
-unification (_, (t3, Arrow{}):_) _ =
-    Left (Echec_unif ("type fleche non-unifiable avec " ++ show t3))
-unification (e1, (Nat,Nat):e2) but =
-    unification (e1, e2) but
-unification (_, (Nat,t3):_) _ =
-    Left (Echec_unif ("type entier non-unifiable avec " ++ show t3))
-unification (_, (t3,Nat):_) _ =
-    Left (Echec_unif ("type entier non-unifiable avec " ++ show t3))
+        unification (n - 1) (substitueTypeZip (rembobine (e1,e2)) v2 t1) but
+unification n (e1, (Arrow t1 t2, Arrow t3 t4):e2) but =
+    unification (n - 1) (e1, (t1,t3):(t2,t4):e2) but
+unification _ (_, (Arrow{}, t3):_) _ =
+    Left $ Echec_unif ("type fleche non-unifiable avec " ++ show t3)
+unification _ (_, (t3, Arrow{}):_) _ =
+    Left $ Echec_unif ("type fleche non-unifiable avec " ++ show t3)
+unification n (e1, (Nat,Nat):e2) but =
+    unification (n - 1) (e1, e2) but
+unification _ (_, (Nat,t3):_) _ =
+    Left $ Echec_unif ("type entier non-unifiable avec " ++ show t3)
+unification _ (_, (t3,Nat):_) _ =
+    Left $ Echec_unif ("type entier non-unifiable avec " ++ show t3)
 
-
-inference :: PTerm -> String
-inference pte = 
-    let eq = genere_equation pte (Type "but") M.empty
+inferencePrinter :: PTerm -> String
+inferencePrinter pte =
+    let eq = genereEquation pte (TVar "but") M.empty
         eqZ = ([], eq) in
-    case unification eqZ "but" of
+    case unification maxStepUnification eqZ "but" of
         Left msg      -> show pte ++ " *** PAS TYPABLE *** :" ++ show msg
         Right res     -> show pte ++ " *** TYPABLE *** avec le type " ++ show res
 
-ex_id :: PTerm
-ex_id = Abs "x" (Variable "x")
-inf_ex_id :: String
-inf_ex_id = inference ex_id
-ex_s :: PTerm
-ex_s =
+inference :: Environnement -> PTerm -> Either EchecUnif PType
+inference env pte =
+    let eq  = genereEquation pte (TVar "but") env
+        eqZ = ([], eq)
+    in unification maxStepUnification eqZ "but"
+
+-- Evaluateur
+
+nouvelleVariableEval :: Set String -> VarGen String
+nouvelleVariableEval used = do
+    n <- ST.get
+    ST.put (n + 1)
+    let v = "x" ++ show n
+    if v `elem` used
+        then nouvelleVariableEval used
+        else return v
+
+renommerVariable :: String -> String -> PTerm -> PTerm
+renommerVariable old new term = case term of
+    Variable v -> if v == old then Variable new else Variable v
+    Abs v t1   -> if v == old
+                    then Abs v t1
+                    else Abs v (renommerVariable old new t1)
+    App t1 t2  -> App (renommerVariable old new t1) (renommerVariable old new t2)
+    Add t1 t2  -> Add (renommerVariable old new t1) (renommerVariable old new t2)
+    N n        -> N n
+
+alphaConversion :: PTerm -> State Int PTerm
+alphaConversion = aux S.empty
+    where
+        aux _ (Variable s) = return $ Variable s
+        aux _ (N i) = return $ N i
+        aux variables (Add pt1 pt2) = do
+            pt1' <- aux variables pt1
+            pt2' <- aux variables pt2
+            return $ Add pt1' pt2'
+        aux variables (App pt1 pt2) = do
+            pt1' <- aux variables pt1
+            pt2' <- aux variables pt2
+            return $ App pt1' pt2'
+        aux variables (Abs x pt) = do
+            x' <- nouvelleVariableEval variables
+            t' <- aux (S.insert x' variables) (renommerVariable x x' pt)
+            return $ Abs x' t'
+
+substitution :: String -> PTerm -> PTerm -> State Int PTerm
+substitution x n (Variable v) = return $ if v == x then n else Variable v
+substitution x n (N k) = return $ N k
+substitution x n (Add t1 t2) = do
+    t1' <- substitution x n t1
+    t2' <- substitution x n t2
+    return $ Add t1' t2'
+substitution x n (App t1 t2) = do
+    t1' <- substitution x n t1
+    t2' <- substitution x n t2
+    return $ App t1' t2'
+substitution x n (Abs v t1) 
+    | v == x = return $ Abs v t1
+    | S.member v (variablesLibre n) = do
+        v' <- nouvelleVariableEval (S.union (variablesLibre t1) (variablesLibre n))
+        t1' <- substitution x n (renommerVariable v v' t1)
+        return $ Abs v' t1'
+    | otherwise = do
+        t1' <- substitution x n t1
+        return $ Abs v t1'
+
+etapeCallByValue :: PTerm -> State Int (Maybe PTerm)
+etapeCallByValue (App (Abs x t) v) | estValeur v = do
+    t' <- substitution x v t
+    return $ Just t'
+etapeCallByValue (App t1 t2) | not (estValeur t1) = do
+    mt1 <- etapeCallByValue t1
+    return $ fmap (`App` t2) mt1
+etapeCallByValue (App v1 t2) | estValeur v1 && not (estValeur t2) = do
+    mt2 <- etapeCallByValue t2
+    return $ fmap (App v1) mt2
+etapeCallByValue (Add (N n1) (N n2)) = return $ Just (N (n1 + n2))
+etapeCallByValue (Add t1 t2) | not (estValeur t1) = do
+    mt1 <- etapeCallByValue t1
+    return $ fmap (`Add` t2) mt1
+etapeCallByValue (Add v1 t2) | estValeur v1 && not (estValeur t2) = do
+    mt2 <- etapeCallByValue t2
+    return $ fmap (Add v1) mt2
+etapeCallByValue _ = return Nothing
+
+evalCallByValue :: Int -> PTerm -> State Int [PTerm]
+evalCallByValue 0 term = return [term]
+evalCallByValue n term = do
+    mterm <- etapeCallByValue term
+    case mterm of
+        Nothing -> return [term]
+        Just t' -> do
+            rest <- evalCallByValue (n - 1) t'
+            return (term : rest)
+
+exId :: PTerm
+exId = Abs "x" (Variable "x")
+infExId :: String
+infExId = inferencePrinter exId
+exS :: PTerm
+exS =
     Abs "x" (
         Abs "y" (
             Abs "z" (
@@ -174,44 +364,55 @@ ex_s =
             )
         )
     )
-inf_ex_s :: String
-inf_ex_s = inference ex_s
-ex_nat1 :: PTerm
-ex_nat1 = App (Abs "x" (Add (Variable "x") (N 1))) (N 3)
-inf_ex_nat1 :: String
-inf_ex_nat1 = inference ex_nat1
-ex_nat2 :: PTerm
-ex_nat2 = Abs "x" (Add (Variable "x") (Variable "x"))
-inf_ex_nat2 :: String
-inf_ex_nat2 = inference ex_nat2
-ex_omega :: PTerm
-ex_omega = App
+infExS :: String
+infExS = inferencePrinter exS
+exNat1 :: PTerm
+exNat1 = App (Abs "x" (Add (Variable "x") (N 1))) (N 3)
+infExNat1 :: String
+infExNat1 = inferencePrinter exNat1
+exNat2 :: PTerm
+exNat2 = Abs "x" (Add (Variable "x") (Variable "x"))
+infExNat2 :: String
+infExNat2 = inferencePrinter exNat2
+exOmega :: PTerm
+exOmega = App
     (Abs "x" (App (Variable "x") (Variable "x")))
     (Abs "y" (App (Variable "y") (Variable "y")))
-inf_ex_omega :: String
-inf_ex_omega = inference ex_omega
+infExOmega :: String
+infExOmega = inferencePrinter exOmega
 ex_nat3 :: PTerm
-ex_nat3 = App ex_nat2 ex_id
-inf_ex_nat3 :: String
-inf_ex_nat3 = inference ex_nat3
-ex_fail :: PTerm
-ex_fail = Add (Abs "x" (Variable "x")) (N 3)
-inf_ex_fail :: String
-inf_ex_fail = inference ex_fail
+ex_nat3 = App exNat2 exId
+infExNat3 :: String
+infExNat3 = inferencePrinter ex_nat3
+exFail :: PTerm
+exFail = Add (Abs "x" (Variable "x")) (N 3)
+infExFail :: String
+infExFail = inferencePrinter exFail
 
 main :: IO ()
 main = do
-    putStrLn "inf_ex_id:"
-    putStrLn inf_ex_id
-    putStrLn "inf_ex_s:"
-    putStrLn inf_ex_s
-    putStrLn "inf_ex_fail:"
-    putStrLn inf_ex_fail
-    putStrLn "inf_ex_nat1:"
-    putStrLn inf_ex_nat1
-    putStrLn "inf_ex_nat2:"
-    putStrLn inf_ex_nat2
-    putStrLn "inf_ex_nat3:"
-    putStrLn inf_ex_nat3
-    putStrLn "inf_ex_omega:"
-    putStrLn inf_ex_omega
+    let stepsExNat1 = ST.evalState (evalCallByValue maxStepEvaluation exNat1) 0
+    let stepsExOmega  = ST.evalState (evalCallByValue maxStepEvaluation exOmega) 0
+    putStrLn "Inférence typable"
+    putStrLn "infExId:"
+    putStrLn infExId
+    putStrLn "infExS:"
+    putStrLn infExS
+    putStrLn "infExNat1:"
+    putStrLn infExNat1
+    putStrLn "infExNat2:"
+    putStrLn infExNat2
+    putStrLn "\nInférence non typable"
+    putStrLn "infExFail:"
+    putStrLn infExFail
+    putStrLn "infExNat3:"
+    putStrLn infExNat3
+    putStrLn "infExOmega:"
+    putStrLn infExOmega
+    putStrLn "\n==========================="
+    putStrLn "======= Evaluation ========"
+    putStrLn "==========================="
+    putStrLn "exOmega"
+    mapM_ print stepsExOmega
+    putStrLn "exNat1"
+    mapM_ print stepsExNat1
