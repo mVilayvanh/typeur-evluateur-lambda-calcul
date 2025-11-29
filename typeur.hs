@@ -1,9 +1,13 @@
+{-# LANGUAGE DeriveAnyClass #-}
+
 import Control.Monad.State(State)
+import Control.Exception(Exception)
+import qualified Control.Exception as E
 import qualified Control.Monad.State as ST 
 import Data.Map(Map)
 import qualified Data.Map as M
-
 import qualified Data.List as L
+import Data.Either(Either)
 
 -- Termes
 data PTerm = Variable String | App PTerm PTerm | Abs String PTerm 
@@ -31,7 +35,14 @@ type Environnement = Map String PType
 -- Listes d'équation
 type Equation = [(PType, PType)]
 
+type Equation_Z = (Equation, Equation)
+
 type Compteur = State Int
+
+data VarPasTrouve = VarPasTrouve deriving (Show, Exception)
+
+data Echec_unif = Echec_unif String
+    deriving (Show, Exception)
 
 nouvelle_variable :: Compteur String
 nouvelle_variable = do
@@ -79,8 +90,37 @@ genere_equation pte pty env = ST.evalState (aux pte pty env) 0
 
     aux (Add pt1 pt2) pty env = do
         eq1 <- aux pt1 Nat env
-        eq2 <- 
+        eq2 <- aux pt2 Nat env
+        return $ (pty, Nat) : (eq1 ++ eq2)
 
+rembobine :: Equation_Z -> Equation_Z
+rembobine e@([], _) = e
+rembobine (c:e1, e2) = (e1, c:e2)  
+
+substitue_type_zip :: Equation_Z -> String -> PType -> Equation_Z
+substitue_type_zip (e1, e2) v pty = 
+    (substitue_type_partout e1 v pty, substitue_type_partout e2 v pty)
+
+trouve_but :: Equation_Z -> String -> Either VarPasTrouve PType
+trouve_but (_, []) _ = Left VarPasTrouve
+trouve_but (_, (Type v, t) : _) but
+    | v == but = Right t
+    | otherwise = Left $ VarPasTrouve
+trouve_but (_, (t, Type v) : _) but 
+    | v == but = Right t
+    | otherwise = Left $ VarPasTrouve
+trouve_but (e1, c : e2) but = trouve_but (c : e1, e2) but
+
+unification :: Equation_Z -> String -> PType
+unification e@(_, []) but = case trouve_but e but of
+    Left _      -> error ""
+    Right pty   -> pty
+unification (e1, (Type v1, Type v2) : e2) but = unification (substitue_type_zip (rembobine (e1, e2)) v2 (Type v1)) but
+unification (e1, (Type v, t) : e2) but 
+    | v == but  = unification ((Type v, t) : e1, e2) but
+    | otherwise = if appartient_type v t then error ""
+                  else unification (substitue_type_zip (rembobine (e1, e2)) v t) but 
+unification (e1, (t, ))
 
 -- Unification
 
