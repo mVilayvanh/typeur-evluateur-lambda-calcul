@@ -224,14 +224,17 @@ genereEquation pte pty env = ST.evalState (aux pte pty env) 1
             sigma = generalise env t0
         aux e2 pty (M.insert x sigma env)
 
+-- rembobine les équations pour traiter la prochaine équation à résoudre
 rembobine :: EquationZ -> EquationZ
 rembobine e@([], _) = e
 rembobine (c:e1, e2) = (e1, c:e2)
 
+-- remplace toutes les occurrences de la variable v par le type pty dans toutes les équations
 substitueTypeZip :: EquationZ -> String -> PType -> EquationZ
 substitueTypeZip (e1, e2) v pty =
     (substitueTypePartout e1 v pty, substitueTypePartout e2 v pty)
 
+-- cherche le type associé à la variable but dans les équations
 trouveBut :: EquationZ -> String -> Either VarPasTrouve PType
 trouveBut (_, []) _ = Left VarPasTrouve
 trouveBut (e1, (TVar v, t) : e2) but
@@ -242,6 +245,7 @@ trouveBut (e1, (t, TVar v) : e2) but
     | otherwise = trouveBut ((t, TVar v) : e1 , e2) but
 trouveBut (e1, c : e2) but = trouveBut (c : e1, e2) but
 
+-- vérifie si les constructeurs des deux types sont compatibles
 constructeursCompatibles :: PType -> PType -> Bool
 constructeursCompatibles (TVar _) _ = True
 constructeursCompatibles _ (TVar _) = True
@@ -253,6 +257,7 @@ constructeursCompatibles (Arrow _ _) (Arrow _ _) = True
 constructeursCompatibles (ListT _) (ListT _) = True
 constructeursCompatibles _ _ = False
 
+-- effectue l'unification des équations pour trouver le type du but
 unification :: Int -> EquationZ -> String -> Either EchecUnif PType
 unification 0 _ _ = Left $ Echec_unif "timeout"
 unification _ e@(_, []) but =
@@ -300,6 +305,7 @@ unification _ (_, (Nat,t3):_) _ =
 unification _ (_, (t3,Nat):_) _ =
     Left $ Echec_unif ("type entier non-unifiable avec " ++ show t3)
 
+-- Type chcker affichant si le pterm est typable ou non
 inferencePrinter :: PTerm -> String
 inferencePrinter pte =
     let eq = genereEquation pte (TVar "but") M.empty
@@ -308,6 +314,7 @@ inferencePrinter pte =
         Left msg      -> show pte ++ " *** PAS TYPABLE *** :" ++ show msg
         Right res     -> show pte ++ " *** TYPABLE *** avec le type " ++ show res
 
+-- infère le type d'un pterm dans un environnement donné, utilisé dans pour le let-polymorphique
 inference :: Environnement -> PTerm -> Either EchecUnif PType
 inference env pte =
     let eq  = genereEquation pte (TVar "but") env
@@ -316,50 +323,51 @@ inference env pte =
 
 -- Evaluateur
 
+-- génère une nouvelle variable qui n'est pas dans l'ensemble des variables
 nouvelleVariableEval :: Set String -> VarGen String
-nouvelleVariableEval used = do
+nouvelleVariableEval variables = do
     n <- ST.get
     ST.put (n + 1)
     let v = "x" ++ show n
-    if v `elem` used
-        then nouvelleVariableEval used
+    if v `elem` variables
+        then nouvelleVariableEval variables
         else return v
 
 -- renomme toutes les occurrences de la variable old par new dans le terme
 renommerVariable :: String -> String -> PTerm -> PTerm
-renommerVariable old new (Variable v) = 
-    if v == old then Variable new 
+renommerVariable courant nouveau (Variable v) =
+    if v == courant then Variable nouveau 
     else Variable v
-renommerVariable old new (Abs v t1) =
-    if v == old then Abs v t1
-    else Abs v (renommerVariable old new t1)
-renommerVariable old new (App t1 t2) = 
-    App (renommerVariable old new t1) (renommerVariable old new t2)
-renommerVariable old new (Add t1 t2) = 
-    Add (renommerVariable old new t1) (renommerVariable old new t2)
-renommerVariable old new (N n) = N n
-renommerVariable old new (Sub t1 t2) =
-    Sub (renommerVariable old new t1) (renommerVariable old new t2)
-renommerVariable old new (Cons t1 t2) =
-    Cons (renommerVariable old new t1) (renommerVariable old new t2)
-renommerVariable old new Nil = Nil
-renommerVariable old new (Head t) =
-    Head (renommerVariable old new t)
-renommerVariable old new (Tail t) =
-    Tail (renommerVariable old new t)
-renommerVariable old new (IfZero c t1 t2) =
-    IfZero (renommerVariable old new c)
-           (renommerVariable old new t1)
-           (renommerVariable old new t2)
-renommerVariable old new (IfEmpty c t1 t2) =
-    IfEmpty (renommerVariable old new c)
-            (renommerVariable old new t1)
-            (renommerVariable old new t2)
-renommerVariable old new (Rec t) =
-    Rec (renommerVariable old new t)
-renommerVariable old new (Let x e1 e2) =
-    Let x (renommerVariable old new e1)
-          (if x == old then e2 else renommerVariable old new e2)
+renommerVariable courant nouveau (Abs v t1) =
+    if v == courant then Abs v t1
+    else Abs v (renommerVariable courant nouveau t1)
+renommerVariable courant nouveau (App t1 t2) = 
+    App (renommerVariable courant nouveau t1) (renommerVariable courant nouveau t2)
+renommerVariable courant nouveau (Add t1 t2) = 
+    Add (renommerVariable courant nouveau t1) (renommerVariable courant nouveau t2)
+renommerVariable courant nouveau (N n) = N n
+renommerVariable courant nouveau (Sub t1 t2) =
+    Sub (renommerVariable courant nouveau t1) (renommerVariable courant nouveau t2)
+renommerVariable courant nouveau (Cons t1 t2) =
+    Cons (renommerVariable courant nouveau t1) (renommerVariable courant nouveau t2)
+renommerVariable courant nouveau Nil = Nil
+renommerVariable courant nouveau (Head t) =
+    Head (renommerVariable courant nouveau t)
+renommerVariable courant nouveau (Tail t) =
+    Tail (renommerVariable courant nouveau t)
+renommerVariable courant nouveau (IfZero c t1 t2) =
+    IfZero (renommerVariable courant nouveau c)
+           (renommerVariable courant nouveau t1)
+           (renommerVariable courant nouveau t2)
+renommerVariable courant nouveau (IfEmpty c t1 t2) =
+    IfEmpty (renommerVariable courant nouveau c)
+            (renommerVariable courant nouveau t1)
+            (renommerVariable courant nouveau t2)
+renommerVariable courant nouveau (Rec t) =
+    Rec (renommerVariable courant nouveau t)
+renommerVariable courant nouveau (Let x e1 e2) =
+    Let x (renommerVariable courant nouveau e1)
+          (if x == courant then e2 else renommerVariable courant nouveau e2)
 
 -- renomme les variables liées pour éviter les conflits
 alphaConversion :: PTerm -> State Int PTerm
@@ -472,6 +480,9 @@ evalCallByValue n term = do
             rest <- evalCallByValue (n - 1) t'
             return (term : rest)
 
+evaluationTerm :: PTerm -> [PTerm]
+evaluationTerm term = ST.evalState (evalCallByValue maxStepEvaluation term) 0
+
 exId :: PTerm
 exId = Abs "x" (Variable "x")
 infExId :: String
@@ -544,8 +555,9 @@ infExIfEmptyCons = inferencePrinter exIfEmptyCons
 
 main :: IO ()
 main = do
-    let stepsExNat1 = ST.evalState (evalCallByValue maxStepEvaluation exNat1) 0
-    let stepsExOmega  = ST.evalState (evalCallByValue maxStepEvaluation exOmega) 0
+    let stepsExNat1 = evaluationTerm exNat1
+    let stepsExOmega  = evaluationTerm exOmega
+    let stepsIfEmptyCons = evaluationTerm exIfEmptyCons
     putStrLn "Inférence typable"
     putStrLn "infExId:"
     putStrLn infExId
@@ -573,7 +585,9 @@ main = do
     putStrLn "\n==========================="
     putStrLn "======= Evaluation ========"
     putStrLn "==========================="
-    --putStrLn "exOmega"
-    --mapM_ print stepsExOmega
+    putStrLn "exOmega"
+    mapM_ print stepsExOmega
     putStrLn "exNat1"
     mapM_ print stepsExNat1
+    putStrLn "exIfEmptyCons"
+    mapM_ print stepsIfEmptyCons
